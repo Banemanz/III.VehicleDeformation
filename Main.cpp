@@ -5,7 +5,8 @@
     Design:
       - GTA III collision/VehicleDamage remains authoritative.
       - Every deformable atomic gets private geometry; model-shared geometry is untouched.
-      - One vehicle-local crush field drives all body/component atomics, so seams agree.
+      - One exact vehicle-local collision contact drives a spherical plastic dent over
+        immutable rest vertices, transformed through each component's current frame.
       - Wheel meshes are never deformed. GTA III remains authoritative for suspension/steering;
         optional wheel translation is applied only around the final CEntity::Render call.
       - Repair restores the private geometry before CAutomobile::Fix.
@@ -85,25 +86,29 @@ struct Config {
     bool enabled = true;
     bool onlyPlayerVehicle = false;
 
-    // GTA III VehicleDamage works in a direct impulse domain. The stock routine
-    // starts reacting at 25 and uses 400/600-class constants for heavy damage,
-    // so deformation is normalized against that same scale instead of VC's
-    // impulse/mass multiplier.
+    // GTA III and Vice City share the same stock damage lineage here: both gate
+    // VehicleDamage at 25, and both use the same >50 player-impact shake expression
+    // (100 + 0.4 * impulse * 2000 / mass, capped at 250).  Keep the visual dent in
+    // GTA III's raw damage-impulse domain; do not import the VC ASI's mass scaling.
     float minimumImpulse = 25.0f;
-    float fullDeformationImpulse = 500.0f;
+    float fullDeformationImpulse = 400.0f;
     float impulseExponent = 0.70f;
     float playerDeformationScale = 1.0f;
     float nonPlayerDeformationScale = 0.85f;
 
-    float radius = 1.10f;
-    float maximumRadius = 1.85f;
+    // Direct-field baseline: localized spherical dent around the original/rest mesh.
+    // Radius growth is the useful VC idea; axial capsules, rim pulling, ripple and
+    // crinkle are intentionally absent from the baseline.
+    float radius = 1.20f;
+    float maximumRadius = 1.80f;
     float maximumDeformationPerImpact = 0.32f;
     float maximumTotalDeformation = 0.72f;
-    float centerResistance = 0.55f;
-    float inwardNormalBlend = 0.18f;
-    float rimPull = 0.04f;
+    float centerResistance = 0.40f;
+    float inwardNormalBlend = 0.0f;
 
-    bool wheelSync = true;
+    // Kept isolated until the body path is stable.  GTA III rewrites wheel matrices
+    // inside CAutomobile::Render, so this is a separate visual layer.
+    bool wheelSync = false;
     float wheelSyncStrength = 0.45f;
     float wheelSyncRadiusScale = 1.10f;
     float wheelSyncMaxOffset = 0.16f;
@@ -124,26 +129,26 @@ static const char kDefaultIni[] =
     "Enabled=1\r\n"
     "OnlyPlayerVehicle=0\r\n"
     "\r\n"
-    "; GTA III native damage-impulse scale. Stock VehicleDamage begins at 25 and\r\n"
-    "; uses 400/600-class values for serious damage.\r\n"
+    "; GTA III native damage-impulse scale. Stock VehicleDamage gates at 25.\r\n"
+    "; III and VC share the same >50 shake formula; visual deformation stays in\r\n"
+    "; III's raw impulse domain instead of importing VC ASI mass scaling.\r\n"
     "MinimumImpulse=25.0\r\n"
-    "FullDeformationImpulse=500.0\r\n"
+    "FullDeformationImpulse=400.0\r\n"
     "ImpulseExponent=0.70\r\n"
     "PlayerDeformationScale=1.0\r\n"
     "NonPlayerDeformationScale=0.85\r\n"
     "\r\n"
-    "; Shared vehicle-space crush field.\r\n"
-    "Radius=1.10\r\n"
-    "MaximumRadius=1.85\r\n"
+    "; Direct spherical dent over immutable rest vertices.\r\n"
+    "Radius=1.20\r\n"
+    "MaximumRadius=1.80\r\n"
     "MaximumDeformationPerImpact=0.32\r\n"
     "MaximumTotalDeformation=0.72\r\n"
-    "CenterResistance=0.55\r\n"
-    "InwardNormalBlend=0.18\r\n"
-    "RimPull=0.04\r\n"
+    "CenterResistance=0.40\r\n"
+    "InwardNormalBlend=0.0\r\n"
     "\r\n"
-    "; GTA III remains authoritative for wheel suspension/steering. WheelSync only\r\n"
-    "; translates wheel dummies during the final clump render and restores them immediately.\r\n"
-    "WheelSync=1\r\n"
+    "; Wheel sync is intentionally OFF in this body-deformation baseline. GTA III\r\n"
+    "; remains authoritative for suspension/steering; enable only after body testing.\r\n"
+    "WheelSync=0\r\n"
     "WheelSyncStrength=0.45\r\n"
     "WheelSyncRadiusScale=1.10\r\n"
     "WheelSyncMaxOffset=0.16\r\n"
@@ -222,7 +227,6 @@ static void LoadConfig() {
     gConfig.maximumTotalDeformation = ReadFloat("MaximumTotalDeformation", gConfig.maximumTotalDeformation);
     gConfig.centerResistance = ReadFloat("CenterResistance", gConfig.centerResistance);
     gConfig.inwardNormalBlend = ReadFloat("InwardNormalBlend", gConfig.inwardNormalBlend);
-    gConfig.rimPull = ReadFloat("RimPull", gConfig.rimPull);
 
     gConfig.wheelSync = ReadBool("WheelSync", gConfig.wheelSync);
     gConfig.wheelSyncStrength = ReadFloat("WheelSyncStrength", gConfig.wheelSyncStrength);
@@ -244,7 +248,6 @@ static void LoadConfig() {
     gConfig.maximumTotalDeformation = std::max(gConfig.maximumDeformationPerImpact, gConfig.maximumTotalDeformation);
     gConfig.centerResistance = Clamp(gConfig.centerResistance, 0.0f, 1.0f);
     gConfig.inwardNormalBlend = Clamp(gConfig.inwardNormalBlend, 0.0f, 0.50f);
-    gConfig.rimPull = Clamp(gConfig.rimPull, 0.0f, 0.30f);
     gConfig.wheelSyncStrength = Clamp(gConfig.wheelSyncStrength, 0.0f, 1.0f);
     gConfig.wheelSyncRadiusScale = std::max(0.25f, gConfig.wheelSyncRadiusScale);
     gConfig.wheelSyncMaxOffset = std::max(0.0f, gConfig.wheelSyncMaxOffset);
@@ -662,11 +665,10 @@ static CollisionSample GetImpact(CAutomobile* car, const DeformData& data, unsig
     return fallback;
 }
 
-struct CrushField {
+struct DentField {
     Vec3 impact{};
     Vec3 push{};
     float radius{};
-    float length{};
     float peakDepth{};
 };
 
@@ -684,50 +686,28 @@ static float CenterFlex(const DeformData& data, Vec3 p) {
     return 1.0f - gConfig.centerResistance * core;
 }
 
-static float FieldWeight(Vec3 p, const CrushField& field, float radiusScale = 1.0f) {
+static float DentWeight(Vec3 restVehicle, const DentField& field, float radiusScale = 1.0f) {
     const float radius = field.radius * radiusScale;
-    if (radius <= kEpsilon || field.length <= kEpsilon)
+    if (radius <= kEpsilon)
         return 0.0f;
 
-    const Vec3 d = Sub(p, field.impact);
-    const float axial = Dot(d, field.push);
-    const float frontLip = radius * 0.12f;
-    if (axial < -frontLip || axial > field.length)
+    // Late III test branches converged on this exact rule: measure every new hit
+    // from the immutable/original vertex, not from base+existingOffset.  That keeps
+    // repeated impacts plastic without letting the active dent region chase itself.
+    const float distance = Length(Sub(restVehicle, field.impact));
+    if (distance >= radius)
         return 0.0f;
-
-    const Vec3 tangent = Sub(d, Mul(field.push, axial));
-    const float crossSq = LengthSq(tangent) / (radius * radius);
-    const float behind = std::max(0.0f, axial) / field.length;
-    const float q = crossSq + behind * behind;
-    if (q >= 1.0f)
-        return 0.0f;
-
-    float s = 1.0f - std::sqrt(std::max(0.0f, q));
-    s = s * s * (3.0f - 2.0f * s);
-    if (axial < 0.0f)
-        s *= 1.0f - (-axial / frontLip);
-    return Clamp(s, 0.0f, 1.0f);
+    return Clamp(1.0f - distance / radius, 0.0f, 1.0f);
 }
 
-static Vec3 FieldDelta(const DeformData& data, Vec3 p, const CrushField& field,
-                       float radiusScale = 1.0f, float strengthScale = 1.0f) {
-    const float weight = FieldWeight(p, field, radiusScale);
+static Vec3 DentDelta(const DeformData& data, Vec3 restVehicle, const DentField& field,
+                      float radiusScale = 1.0f, float strengthScale = 1.0f) {
+    const float weight = DentWeight(restVehicle, field, radiusScale);
     if (weight <= 0.0f)
         return {};
 
-    Vec3 direction = field.push;
-    if (gConfig.rimPull > 0.0f) {
-        const Vec3 toImpact = Sub(field.impact, p);
-        const Vec3 tangent = Sub(toImpact, Mul(field.push, Dot(toImpact, field.push)));
-        const Vec3 toward = Normalize(tangent);
-        if (LengthSq(toward) > kEpsilon) {
-            const float rim = gConfig.rimPull * (1.0f - weight);
-            direction = Normalize(Add(Mul(field.push, 1.0f - rim), Mul(toward, rim)), field.push);
-        }
-    }
-
-    const float amount = field.peakDepth * weight * CenterFlex(data, p) * strengthScale;
-    return Mul(direction, amount);
+    const float amount = field.peakDepth * weight * CenterFlex(data, restVehicle) * strengthScale;
+    return Mul(field.push, amount);
 }
 
 static void ClampVector(Vec3& v, float maximum) {
@@ -736,8 +716,8 @@ static void ClampVector(Vec3& v, float maximum) {
         v = Mul(v, maximum / len);
 }
 
-static bool ApplyFieldToAtomic(CAutomobile* car, DeformData& data, AtomicState& state,
-                               const CrushField& field) {
+static bool ApplyDentToAtomic(CAutomobile* car, DeformData& data, AtomicState& state,
+                              const DentField& field) {
     if (!car || !state.atomic || !state.geometry || state.atomic->geometry != state.geometry ||
         state.vertexCount <= 0 || state.baseVertices.size() != static_cast<size_t>(state.vertexCount) ||
         state.offsets.size() != static_cast<size_t>(state.vertexCount) || !state.geometry->morphTarget ||
@@ -755,15 +735,13 @@ static bool ApplyFieldToAtomic(CAutomobile* car, DeformData& data, AtomicState& 
         const size_t index = static_cast<size_t>(i);
         Vec3& localOffset = state.offsets[index];
         const RwV3d& base = state.baseVertices[index];
-        const RwV3d currentLocal = {
-            base.x + localOffset.x, base.y + localOffset.y, base.z + localOffset.z
-        };
 
-        // Re-evaluate the vertex through its CURRENT frame every impact. Doors, bonnet,
-        // boot and swinging components are animated by GTA III during Render; caching a
-        // one-time vehicle-space position makes later impacts tear those pieces apart.
-        const Vec3 currentVehicle = AtomicToVehiclePoint(car, *ltm, currentLocal);
-        const Vec3 vehicleDelta = FieldDelta(data, currentVehicle, field);
+        // The rest vertex is immutable, but its component frame is not.  Transform the
+        // rest point through the CURRENT frame so an open door/bonnet/boot is hit where
+        // GTA III currently renders it, while the old plastic offset stays local to that
+        // component and therefore follows subsequent animation naturally.
+        const Vec3 restVehicle = AtomicToVehiclePoint(car, *ltm, base);
+        const Vec3 vehicleDelta = DentDelta(data, restVehicle, field);
         if (LengthSq(vehicleDelta) > kEpsilon * kEpsilon) {
             const Vec3 worldDelta = VehicleToWorldVector(car, vehicleDelta);
             const Vec3 localDelta = WorldVectorToAtomic(*ltm, worldDelta);
@@ -793,7 +771,7 @@ static bool ApplyFieldToAtomic(CAutomobile* car, DeformData& data, AtomicState& 
     return true;
 }
 
-static void ApplyFieldToWheels(CAutomobile* car, DeformData& data, const CrushField& field) {
+static void ApplyDentToWheels(CAutomobile* car, DeformData& data, const DentField& field) {
     if (!car || !gConfig.wheelSync)
         return;
 
@@ -802,17 +780,17 @@ static void ApplyFieldToWheels(CAutomobile* car, DeformData& data, const CrushFi
         if (!ltm)
             continue;
         const Vec3 current = WorldToVehiclePoint(car, FromRw(ltm->pos));
-        Vec3 delta = FieldDelta(data, Add(current, wheel.offsetVehicle), field,
-                                gConfig.wheelSyncRadiusScale, gConfig.wheelSyncStrength);
+        Vec3 delta = DentDelta(data, current, field,
+                               gConfig.wheelSyncRadiusScale, gConfig.wheelSyncStrength);
         delta.z *= gConfig.wheelSyncVerticalScale;
         wheel.offsetVehicle = Add(wheel.offsetVehicle, delta);
         ClampVector(wheel.offsetVehicle, gConfig.wheelSyncMaxOffset);
     }
 }
 
-static CrushField MakeCrushField(CAutomobile* car, const DeformData& data,
-                                 const CollisionSample& impact, float impulse, float scale) {
-    CrushField field;
+static DentField MakeDentField(CAutomobile* car, const DeformData& data,
+                               const CollisionSample& impact, float impulse, float scale) {
+    DentField field;
     field.impact = WorldToVehiclePoint(car, FromC(impact.point));
 
     const Vec3 center = data.boundsValid
@@ -820,9 +798,9 @@ static CrushField MakeCrushField(CAutomobile* car, const DeformData& data,
         : V(0.0f, 0.0f, 0.0f);
     const Vec3 inward = Normalize(Sub(center, field.impact), V(0.0f, -1.0f, 0.0f));
 
-    // m_vecDamageNormal is the normal GTA III selected together with the winning
-    // m_fDamageImpulse/m_nDamagePieceType record. Orient it toward the vehicle volume
-    // so a collision normal convention cannot turn a dent into an outward extrusion.
+    // GTA III stores m_vecDamageNormal with the same winning damage record as
+    // m_fDamageImpulse/m_nDamagePieceType.  Use that authoritative direction, only
+    // flipping the sign when necessary so the visual dent cannot extrude outward.
     Vec3 damageNormal = Normalize(WorldToVehicleVector(car, FromC(car->m_vecDamageNormal)), inward);
     if (Dot(damageNormal, inward) < 0.0f)
         damageNormal = Mul(damageNormal, -1.0f);
@@ -831,15 +809,15 @@ static CrushField MakeCrushField(CAutomobile* car, const DeformData& data,
 
     const float range = gConfig.fullDeformationImpulse - gConfig.minimumImpulse;
     const float normalized = Clamp((impulse - gConfig.minimumImpulse) / range, 0.0f, 1.0f);
-    // GTA III's useful damage range is compact. A sub-linear power curve makes ordinary
-    // 75-250 impulse crashes visibly plastic while still reserving the full displacement
-    // cap for the 400-500+ range used by the stock damage routine.
     const float severity = Clamp(std::pow(normalized, gConfig.impulseExponent) * scale, 0.0f, 1.0f);
 
+    // VC's working deformation mod grows a spherical radius with impact strength.  The
+    // old III direct-field branches independently converged on the same broad idea.
+    // Keep III's raw-impulse severity, but use that simple spherical shape instead of
+    // the refactor's axial capsule, which could reject the visible shell entirely.
     field.peakDepth = gConfig.maximumDeformationPerImpact * severity;
     field.radius = gConfig.radius +
         (gConfig.maximumRadius - gConfig.radius) * std::sqrt(severity);
-    field.length = field.radius * (0.75f + 0.55f * severity);
     return field;
 }
 
@@ -855,13 +833,13 @@ static void DeformVehicle(CAutomobile* car, float impulse, unsigned short compon
     const float scale = car == FindPlayerVehicle()
         ? gConfig.playerDeformationScale
         : gConfig.nonPlayerDeformationScale;
-    const CrushField field = MakeCrushField(car, data, impact, impulse, scale);
+    const DentField field = MakeDentField(car, data, impact, impulse, scale);
     if (field.peakDepth <= kEpsilon)
         return;
 
     for (AtomicState& state : data.atomics)
-        ApplyFieldToAtomic(car, data, state, field);
-    ApplyFieldToWheels(car, data, field);
+        ApplyDentToAtomic(car, data, state, field);
+    ApplyDentToWheels(car, data, field);
 }
 
 struct WheelRenderBackup {
