@@ -1,0 +1,70 @@
+VehDeformIII - GTA III native refactor
+
+Target
+- GTA III 1.0 EN
+- Plugin-SDK pinned revision: 62fd0ef66f704cf7e649607b57cc6e8097ed6e58
+- Hook API: shared/Patch.h
+
+GTA III behavior used by this revision
+- CPhysical::ApplyCollision       0x4973A0
+- CPhysical::ApplyCollisionAlt    0x4992A0
+- CEntity::Render                 0x474BD0
+- CAutomobile::VehicleDamage      0x52F390
+- CAutomobile::Render             0x539EA0
+- CAutomobile::Fix                0x53C240
+- VehicleDamage call              0x531FE3
+- Fix call                        0x422787
+- CEntity::Render call inside CAutomobile::Render 0x53B248
+- RwFrameUpdateObjects            0x5A1C60
+- RwFrameGetLTM                   0x5A1CE0
+
+Important corrections from the previous refactor
+1. No VehicleExtender. Per-car state is an explicit unordered_map cleaned by
+   vehicleSetModelEvent and vehicleDtorEvent.
+2. GTA III impulse scaling is used directly. VehicleDamage begins reacting around
+   25 and uses 400/600-class constants; VC's impulse*0.0015/mass formula made III
+   deformation effectively invisible.
+3. The collision point mirrors GTA III's winning damage record: after the original
+   ApplyCollision returns, the highest returned impulse for that vehicle/frame wins.
+   VehicleDamage then uses GTA's own m_vecDamageNormal for direction.
+4. RenderWare instance entries are not manually freed. RpGeometryLock/Unlock is the
+   supported dirty/reinstance path and owns lockedSinceLastInst bookkeeping.
+5. Component deformation is stored in each atomic's local mesh space, but every new
+   impact evaluates vertices through that atomic's current frame into a single
+   vehicle-space crush field. Swinging doors/bonnet/boot therefore keep their GTA III
+   frame animation instead of using a stale transform captured on first damage.
+6. The vehicle collision model's bound box is the primary body envelope/center for
+   crush math, rather than an arbitrary collection of current render-atomic bounds.
+7. Wheel correction is render-scoped. GTA III finalizes wheel transforms inside
+   CAutomobile::Render; immediately before its 0x53B248 CEntity::Render call the
+   visual wheel offsets are applied, and they are restored immediately afterward.
+   Physics and stock suspension never see the correction.
+
+RenderWare ownership
+- Each non-wheel atomic receives private owned geometry so deformation is per vehicle.
+- The atomic keeps the geometry reference; our state only stores raw pointers and
+  vertex arrays. Vehicle/clump teardown therefore remains the RenderWare owner.
+- Hidden stock damaged atomics are also cloned so GTA III can switch visibility without
+  showing an undeformed shared model variant.
+
+INI
+- The module-matching .ini is created with CREATE_NEW only when absent.
+- Existing INIs are never overwritten.
+- Old VC-style keys such as ImpactMultiplier/FallbackMass are intentionally ignored.
+
+Validation performed here
+- g++ C++17 syntax pass with warnings-as-errors against API-shape stubs.
+- clang++ C++17 syntax pass with warnings-as-errors against the same stubs.
+- Static audit for forbidden/stale VehicleExtender, GameVersion, runtime-version and
+  manual RenderWare repEntry code.
+
+Not validated here
+- Actual MSVC plugin_iii.lib link.
+- In-game D3D8/RenderWare behavior. That still requires GTA III itself.
+
+Current status
+- WIP checkpoint only. The current branch regressed too far from earlier versions in
+  how mesh deformation itself behaves. Next work should reintroduce the proven local
+  dent falloff/direction behavior from earlier VehDeformIII/VC-derived revisions while
+  retaining the GTA III-specific collision selection, component-frame handling,
+  geometry ownership, and render-lifetime fixes documented above.
